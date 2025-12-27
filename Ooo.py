@@ -26,9 +26,8 @@ PROVIDER_TOKEN = ""
 INVOICE_EMOJI = "⭐"
 
 # Если хотите использовать custom premium emoji, укажите его ID (int) здесь или через окружение:
-# Пример: INVOICE_CUSTOM_EMOJI_ID = 5391176922854096298
-# <-- ВАЖНО: поставил ваш ID здесь:
-INVOICE_CUSTOM_EMOJI_ID = 5391176922854096298
+# ВАШ НОВЫЙ ID:
+INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
 ADMIN_ID = 7738435649
@@ -478,7 +477,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
                 # use positional args — более совместимо с разными версиями Telethon
                 entities.append(MessageEntityTextUrl(offset, len(payment_text), invoice_url))
 
-            # send message using formatting_entities (не entities) — это ожидаемый параметр в Telethon
+            # send message using formatting_entities (не entities) — это ожидаемый параметр в Telethon 1.42.0
             user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
 
             # Prepare thank-you text (with custom emoji appended only there)
@@ -489,7 +488,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
                 # position of the placeholder char:
                 emoji_offset = len(thank_base) + 1  # +1 for the space
                 # positional args for MessageEntityCustomEmoji(offset, length, custom_emoji_id)
-                thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, INVOICE_CUSTOM_EMOJI_ID)]
+                thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
             else:
                 thank_text = thank_base
                 thank_entities = None
