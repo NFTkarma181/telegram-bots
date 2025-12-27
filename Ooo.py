@@ -516,7 +516,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
             # Use the HTML <emoji document_id="..."> form you requested so it's rendered (if client/permissions allow).
             # NOTE: I removed the .custom command per your request and now always use the snippet below.
             # The snippet added is: <emoji document_id="5208456004626320633">😴</emoji>
-            thank_html = 'Спасибо за покупку! <emoji document_id="5208456004626320633">😴</emoji>'
+            thank_html = 'Спасибо за покупку! <emoji document_id="5999031072887673336">😴</emoji>'
 
             # register mapping for deletion on successful payment and for thank-you (mark to use HTML)
             await register_invoice(used_payload, {
