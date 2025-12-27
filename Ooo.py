@@ -19,7 +19,7 @@ from telethon.tl.types import MessageEntityTextUrl, MessageEntityCustomEmoji
 
 # ==========================
 # Основная конфигурация — поставьте BOT_TOKEN и (опционально) ADMIN_ID
-BOT_TOKEN =  "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw"       # вставьте токен BotFather или установите BOT_TOKEN в 
+BOT_TOKEN = "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw"            # вставьте токен BotFather или установите BOT_TOKEN в окружении
 PROVIDER_TOKEN = ""
 
 # Unicode emoji (fallback). Если указан INVOICE_CUSTOM_EMOJI_ID, будет использован custom emoji вместо этого.
@@ -27,7 +27,6 @@ INVOICE_EMOJI = "⭐"
 
 # Если хотите использовать custom premium emoji, укажите его ID (int) здесь или через окружение:
 # Пример: INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
-# <-- ВАШ ID:
 INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
@@ -310,6 +309,7 @@ async def bot_updates_task():
                                 if client is not None:
                                     thank_entities = mapping.get("thank_entities")
                                     if thank_entities:
+                                        log.info("Sending thank-you to %s with entities=%s text=%r", target_chat, thank_entities, thank_text)
                                         await client.send_message(entity=target_chat, message=thank_text, formatting_entities=thank_entities, link_preview=False)
                                     else:
                                         await client.send_message(entity=target_chat, message=thank_text, link_preview=False)
@@ -327,7 +327,7 @@ async def bot_updates_task():
             await asyncio.sleep(2.0)
 
 
-# ---- Outgoing handler (.info, .refund, .star) ----
+# ---- Outgoing handler (.info, .refund, .star, .testemoji) ----
 async def outgoing_handler(event: events.NewMessage.Event):
     text = (event.raw_text or "").strip()
     if not text:
@@ -337,7 +337,8 @@ async def outgoing_handler(event: events.NewMessage.Event):
         info_text = (
             "Команды:\n"
             ".star <сумма> — отправляет чек (текст + ссылка) пользователю.\n"
-            ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n\n"
+            ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n"
+            ".testemoji <@user|id> — отправит тестовое сообщение с кастом-эмодзи для проверки.\n\n"
             "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!'."
         )
         sent = await event.reply(info_text)
@@ -375,6 +376,47 @@ async def outgoing_handler(event: events.NewMessage.Event):
             schedule_delete(err.chat_id, err.id, DELETION_DELAY)
         schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
         schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+        return
+
+    if text.lower().startswith(".testemoji"):
+        # Usage: .testemoji (reply) OR .testemoji <@username|id>
+        parts = text.split()
+        target = None
+        if len(parts) == 1 and event.is_reply:
+            rep = await event.get_reply_message()
+            target = rep.sender_id if rep else None
+        elif len(parts) >= 2:
+            spec = parts[1]
+            try:
+                if spec.startswith("@"):
+                    ent = await client.get_entity(spec)
+                    target = getattr(ent, "id", None)
+                else:
+                    target = int(spec)
+            except Exception:
+                target = None
+        if not target:
+            sent = await event.reply("Использование: .testemoji <@user|id> или reply на сообщение.")
+            schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
+            schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+            return
+
+        # send test message with custom emoji placeholder and fallback unicode
+        try:
+            if INVOICE_CUSTOM_EMOJI_ID:
+                placeholder = "\uFFFC"
+                test_text = f"Тест кастомного эмодзи: {placeholder}"
+                emoji_offset = test_text.rfind(placeholder)
+                test_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
+                log.info("Sending test emoji to %s entities=%s text=%r", target, test_entities, test_text)
+                await client.send_message(entity=target, message=test_text, formatting_entities=test_entities, link_preview=False)
+            # also send a unicode fallback so you see something if custom emoji не рендерится
+            await client.send_message(entity=target, message=f"Фолбэк: {INVOICE_EMOJI}", link_preview=False)
+            await event.reply("Тест отправлен.")
+        except Exception:
+            log.exception("Failed to send test emoji")
+            await event.reply("Не удалось отправить тестовое сообщение (см логи).")
+        schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
         return
 
     if text.lower().startswith(".star"):
@@ -481,19 +523,26 @@ async def outgoing_handler(event: events.NewMessage.Event):
             # send message using formatting_entities (Telethon 1.42.0 expects formatting_entities)
             user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
 
-            # Prepare thank-you text (with custom emoji placeholder + visible [ID])
+            # Prepare thank-you text (only placeholder for custom emoji, no visible [ID])
             thank_base = "Спасибо за покупку!"
             if INVOICE_CUSTOM_EMOJI_ID:
                 placeholder_char = "\uFFFC"
-                # include placeholder (for the custom emoji) and also append visible [ID] so it's obvious if the client doesn't render emoji
-                thank_text = f"{thank_base} {placeholder_char} [{INVOICE_CUSTOM_EMOJI_ID}]"
+                # include placeholder only; custom emoji will be attached via MessageEntityCustomEmoji
+                thank_text = f"{thank_base} {placeholder_char}"
                 # position of the placeholder char: immediately after thank_base + space
                 emoji_offset = len(thank_base) + 1  # offset in characters
                 # create MessageEntityCustomEmoji using positional args (offset, length, custom_emoji_id)
-                thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
+                try:
+                    thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
+                except Exception:
+                    # fallback: log if constructor signature differs
+                    log.exception("Failed creating MessageEntityCustomEmoji; falling back to no-entities for thank-you")
+                    thank_entities = None
             else:
                 thank_text = thank_base
                 thank_entities = None
+
+            log.debug("Registering invoice mapping used_payload=%s thank_text=%r thank_entities=%s", used_payload, thank_text, thank_entities)
 
             # register mapping for deletion on successful payment and for thank-you
             await register_invoice(used_payload, {
