@@ -1,4 +1,4 @@
-# full contents of telegram_invoice.py
+# full contents of telegram_invoice.py (with .custom/.uncustom and persistent replacement map)
 import os
 import asyncio
 import time
@@ -31,6 +31,9 @@ INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
 ADMIN_ID = 7738435649
+
+# Файл для сохранения замен (emoji -> custom_emoji_id)
+REPLACEMENTS_FILE = "custom_replacements.json"
 
 # Остальное
 CURRENCY = "XTR"
@@ -81,9 +84,43 @@ client = None  # type: Optional[object]
 INVOICE_MAP = {}
 INVOICE_MAP_LOCK = asyncio.Lock()
 
+# replacement map: unicode_emoji -> custom_emoji_id (int)
+CUSTOM_REPLACEMENTS = {}
+_CUSTOM_REPLACEMENTS_LOCK = asyncio.Lock()
+
 # handlers and background task references
 _REGISTERED_HANDLERS = []
 _BOT_TASK = None
+
+
+# ---- persistence for replacements ----
+def _load_replacements():
+    global CUSTOM_REPLACEMENTS
+    try:
+        if os.path.exists(REPLACEMENTS_FILE):
+            with open(REPLACEMENTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # ensure keys are str and values are int
+            CUSTOM_REPLACEMENTS = {str(k): int(v) for k, v in data.items()}
+            log.info("Loaded %d custom replacements from %s", len(CUSTOM_REPLACEMENTS), REPLACEMENTS_FILE)
+        else:
+            CUSTOM_REPLACEMENTS = {}
+    except Exception:
+        log.exception("Failed to load replacements file; starting with empty map")
+        CUSTOM_REPLACEMENTS = {}
+
+
+def _save_replacements():
+    try:
+        with open(REPLACEMENTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(CUSTOM_REPLACEMENTS, f, ensure_ascii=False, indent=2)
+        log.info("Saved %d custom replacements to %s", len(CUSTOM_REPLACEMENTS), REPLACEMENTS_FILE)
+    except Exception:
+        log.exception("Failed to save replacements file")
+
+
+# attempt load at import
+_load_replacements()
 
 
 # ---- Bot API helpers ----
@@ -327,19 +364,28 @@ async def bot_updates_task():
             await asyncio.sleep(2.0)
 
 
-# ---- Outgoing handler (.info, .refund, .star, .testemoji) ----
+# ---- Outgoing handler (.info, .refund, .star, .testemoji, .custom, .uncustom) ----
 async def outgoing_handler(event: events.NewMessage.Event):
     text = (event.raw_text or "").strip()
     if not text:
         return
+
+    # helper to reply temporary messages and schedule deletion
+    async def _temp_reply(txt: str):
+        sent = await event.reply(txt)
+        schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
+        schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+        return sent
 
     if text.lower().startswith(".info"):
         info_text = (
             "Команды:\n"
             ".star <сумма> — отправляет чек (текст + ссылка) пользователю.\n"
             ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n"
-            ".testemoji <@user|id> — отправит тестовое сообщение с кастом-эмодзи для проверки.\n\n"
-            "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!'."
+            ".testemoji <@user|id|emoji> — отправит тестовое сообщение с кастом-эмодзи для проверки.\n"
+            ".custom <emoji> — в reply: привязать указанный юникод-эмодзи к кастом-эмодзи (INVOICE_CUSTOM_EMOJI_ID).\n"
+            ".uncustom <emoji> — удалить привязку.\n\n"
+            "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!' с кастом-эмодзи, если привязка есть."
         )
         sent = await event.reply(info_text)
         schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
@@ -348,15 +394,11 @@ async def outgoing_handler(event: events.NewMessage.Event):
 
     if text.lower().startswith(".refund"):
         if ADMIN_ID is None or event.sender_id != ADMIN_ID:
-            sent = await event.reply("Нет прав на выполнение .refund.")
-            schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
-            schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+            await _temp_reply("Нет прав на выполнение .refund.")
             return
         parts = text.split()
         if len(parts) < 3:
-            sent = await event.reply("Использование: .refund <user_id> <telegram_payment_charge_id>")
-            schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
-            schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+            await _temp_reply("Использование: .refund <user_id> <telegram_payment_charge_id>")
             return
         user_id = parts[1]
         payment_id = parts[2]
@@ -379,44 +421,103 @@ async def outgoing_handler(event: events.NewMessage.Event):
         return
 
     if text.lower().startswith(".testemoji"):
-        # Usage: .testemoji (reply) OR .testemoji <@username|id>
+        # Usage: .testemoji (reply) OR .testemoji <@username|id|emoji>
         parts = text.split()
         target = None
+        emoji_to_test = None
         if len(parts) == 1 and event.is_reply:
             rep = await event.get_reply_message()
             target = rep.sender_id if rep else None
         elif len(parts) >= 2:
             spec = parts[1]
-            try:
-                if spec.startswith("@"):
-                    ent = await client.get_entity(spec)
-                    target = getattr(ent, "id", None)
-                else:
-                    target = int(spec)
-            except Exception:
-                target = None
+            # if spec looks like a single emoji, treat as emoji_to_test; else resolve user
+            if len(spec) <= 4 and not spec.startswith("@") and not spec.isdigit():
+                emoji_to_test = spec
+                if event.is_reply:
+                    rep = await event.get_reply_message()
+                    target = rep.sender_id if rep else None
+            else:
+                try:
+                    if spec.startswith("@"):
+                        ent = await client.get_entity(spec)
+                        target = getattr(ent, "id", None)
+                    else:
+                        target = int(spec)
+                except Exception:
+                    target = None
         if not target:
-            sent = await event.reply("Использование: .testemoji <@user|id> или reply на сообщение.")
-            schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
-            schedule_delete(sent.chat_id, sent.id, DELETION_DELAY)
+            await _temp_reply("Использование: .testemoji <@user|id|emoji> или reply на сообщение.")
             return
 
-        # send test message with custom emoji placeholder and fallback unicode
+        # send test message with custom emoji placeholder and fallback unicode or specific emoji
         try:
-            if INVOICE_CUSTOM_EMOJI_ID:
+            if emoji_to_test is None:
+                emoji_to_test = INVOICE_EMOJI
+            # If there is a custom replacement for this emoji, send it using MessageEntityCustomEmoji
+            custom_id = CUSTOM_REPLACEMENTS.get(emoji_to_test)
+            if custom_id:
                 placeholder = "\uFFFC"
                 test_text = f"Тест кастомного эмодзи: {placeholder}"
                 emoji_offset = test_text.rfind(placeholder)
-                test_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
+                test_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(custom_id))]
                 log.info("Sending test emoji to %s entities=%s text=%r", target, test_entities, test_text)
                 await client.send_message(entity=target, message=test_text, formatting_entities=test_entities, link_preview=False)
+            else:
+                # no mapping: try using INVOICE_CUSTOM_EMOJI_ID if set
+                if INVOICE_CUSTOM_EMOJI_ID:
+                    placeholder = "\uFFFC"
+                    test_text = f"Тест кастомного эмодзи: {placeholder}"
+                    emoji_offset = test_text.rfind(placeholder)
+                    test_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
+                    log.info("Sending test emoji to %s entities=%s text=%r", target, test_entities, test_text)
+                    await client.send_message(entity=target, message=test_text, formatting_entities=test_entities, link_preview=False)
+                else:
+                    await client.send_message(entity=target, message=f"Фолбэк: {emoji_to_test}", link_preview=False)
             # also send a unicode fallback so you see something if custom emoji не рендерится
-            await client.send_message(entity=target, message=f"Фолбэк: {INVOICE_EMOJI}", link_preview=False)
+            await client.send_message(entity=target, message=f"Фолбэк: {emoji_to_test}", link_preview=False)
             await event.reply("Тест отправлен.")
         except Exception:
             log.exception("Failed to send test emoji")
             await event.reply("Не удалось отправить тестовое сообщение (см логи).")
         schedule_delete(event.chat_id, event.message.id, DELETION_DELAY)
+        return
+
+    if text.lower().startswith(".custom"):
+        # Usage: .custom <emoji>  in reply to a message (the replied message is optional but recommended)
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await _temp_reply("Использование: .custom <emoji> (в reply на сообщение с эмодзи или просто укажите эмодзи)")
+            return
+        emoji = parts[1].strip()
+        if not emoji:
+            await _temp_reply("Не указан эмодзи.")
+            return
+
+        # Bind the provided unicode emoji to the INVOICE_CUSTOM_EMOJI_ID
+        if INVOICE_CUSTOM_EMOJI_ID is None:
+            await _temp_reply("INVOICE_CUSTOM_EMOJI_ID не задан — нечему привязать.")
+            return
+
+        async with _CUSTOM_REPLACEMENTS_LOCK:
+            CUSTOM_REPLACEMENTS[emoji] = int(INVOICE_CUSTOM_EMOJI_ID)
+            _save_replacements()
+        await _temp_reply(f"Готово — эмодзи {emoji} теперь будет заменяться на указанный кастомный эмодзи (id={INVOICE_CUSTOM_EMOJI_ID}).")
+        return
+
+    if text.lower().startswith(".uncustom"):
+        # Usage: .uncustom <emoji>
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await _temp_reply("Использование: .uncustom <emoji>")
+            return
+        emoji = parts[1].strip()
+        async with _CUSTOM_REPLACEMENTS_LOCK:
+            if emoji in CUSTOM_REPLACEMENTS:
+                del CUSTOM_REPLACEMENTS[emoji]
+                _save_replacements()
+                await _temp_reply(f"Привязка для {emoji} удалена.")
+            else:
+                await _temp_reply(f"Для {emoji} не было привязки.")
         return
 
     if text.lower().startswith(".star"):
@@ -523,24 +624,40 @@ async def outgoing_handler(event: events.NewMessage.Event):
             # send message using formatting_entities (Telethon 1.42.0 expects formatting_entities)
             user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
 
-            # Prepare thank-you text (only placeholder for custom emoji, no visible [ID])
+            # Prepare thank-you text:
+            # - If there's a mapping for INVOICE_EMOJI -> use the mapped custom emoji
+            # - Otherwise, if INVOICE_CUSTOM_EMOJI_ID set, use that
+            # - Otherwise use unicode INVOICE_EMOJI
             thank_base = "Спасибо за покупку!"
-            if INVOICE_CUSTOM_EMOJI_ID:
+            thank_text = thank_base
+            thank_entities = None
+
+            # determine which unicode emoji we want to replace in thank-you
+            emoji_to_replace = INVOICE_EMOJI
+
+            # check replacement map
+            custom_id = CUSTOM_REPLACEMENTS.get(emoji_to_replace)
+            if custom_id:
                 placeholder_char = "\uFFFC"
-                # include placeholder only; custom emoji will be attached via MessageEntityCustomEmoji
                 thank_text = f"{thank_base} {placeholder_char}"
                 # position of the placeholder char: immediately after thank_base + space
                 emoji_offset = len(thank_base) + 1  # offset in characters
-                # create MessageEntityCustomEmoji using positional args (offset, length, custom_emoji_id)
+                try:
+                    thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(custom_id))]
+                except Exception:
+                    log.exception("Failed creating MessageEntityCustomEmoji for mapped id; skipping entities")
+                    thank_entities = None
+            elif INVOICE_CUSTOM_EMOJI_ID:
+                placeholder_char = "\uFFFC"
+                thank_text = f"{thank_base} {placeholder_char}"
+                emoji_offset = len(thank_base) + 1
                 try:
                     thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
                 except Exception:
-                    # fallback: log if constructor signature differs
-                    log.exception("Failed creating MessageEntityCustomEmoji; falling back to no-entities for thank-you")
+                    log.exception("Failed creating MessageEntityCustomEmoji for INVOICE_CUSTOM_EMOJI_ID; skipping entities")
                     thank_entities = None
             else:
-                thank_text = thank_base
-                thank_entities = None
+                thank_text = f"{thank_base} {INVOICE_EMOJI}"
 
             log.debug("Registering invoice mapping used_payload=%s thank_text=%r thank_entities=%s", used_payload, thank_text, thank_entities)
 
