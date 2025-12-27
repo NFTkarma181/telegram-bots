@@ -19,11 +19,11 @@ from telethon.tl.types import MessageEntityTextUrl
 
 # ==========================
 # Основная конфигурация — поставьте BOT_TOKEN и (опционально) ADMIN_ID
-BOT_TOKEN = "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw"            # вставьте токен BotFather или установите BOT_TOKEN в окружении
+BOT_TOKEN = "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw" # вставьте токен BotFather или установите BOT_TOKEN в окружении
 PROVIDER_TOKEN = ""
 
 # Unicode emoji (fallback).
-INVOICE_EMOJI = "⭐"
+INVOICE_EMOJI = "👌"
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
 ADMIN_ID = 7738435649
@@ -330,7 +330,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
             "Команды:\n"
             ".star <сумма> — отправляет чек (текст + ссылка) пользователю.\n"
             ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n"
-            ".testemoji <@user|id|emoji> — отправит тестовое сообщение с кастом-эмодзи для проверки.\n\n"
+            ".testemoji <@user|id> — отправит тестовое сообщение с HTML-эмодзи для проверки.\n\n"
             "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!' с кастом-эмодзи (HTML-форма)."
         )
         sent = await event.reply(info_text)
@@ -369,38 +369,30 @@ async def outgoing_handler(event: events.NewMessage.Event):
     if text.lower().startswith(".testemoji"):
         parts = text.split()
         target = None
-        emoji_to_test = None
         if len(parts) == 1 and event.is_reply:
             rep = await event.get_reply_message()
             target = rep.sender_id if rep else None
         elif len(parts) >= 2:
             spec = parts[1]
-            # if spec looks like a short emoji, treat as emoji_to_test; else resolve user
-            if len(spec) <= 4 and not spec.startswith("@") and not spec.isdigit():
-                emoji_to_test = spec
-                if event.is_reply:
-                    rep = await event.get_reply_message()
-                    target = rep.sender_id if rep else None
-            else:
-                try:
-                    if spec.startswith("@"):
-                        ent = await client.get_entity(spec)
-                        target = getattr(ent, "id", None)
-                    else:
-                        target = int(spec)
-                except Exception:
-                    target = None
+            try:
+                if spec.startswith("@"):
+                    ent = await client.get_entity(spec)
+                    target = getattr(ent, "id", None)
+                else:
+                    target = int(spec)
+            except Exception:
+                target = None
         if not target:
-            await _temp_reply("Использование: .testemoji <@user|id|emoji> или reply на сообщение.")
+            await _temp_reply("Использование: .testemoji <@user|id> или reply на сообщение.")
             return
 
         try:
             # send test message using HTML <emoji document_id="..."> form (Telegram may render if allowed)
-            # here we include the same snippet you asked to add
-            html_snippet = '<emoji document_id="5208456004626320633">😴</emoji>'
+            # User requested: use document_id=5208725127277087011 and emoji '👌'
+            html_snippet = '<emoji document_id="5208725127277087011">👌</emoji>'
             await client.send_message(entity=target, message=f"Тест кастомного эмодзи: {html_snippet}", parse_mode="html", link_preview=False)
             # unicode fallback
-            await client.send_message(entity=target, message=f"Фолбэк: {emoji_to_test or INVOICE_EMOJI}", link_preview=False)
+            await client.send_message(entity=target, message=f"Фолбэк: {INVOICE_EMOJI}", link_preview=False)
             await event.reply("Тест отправлен.")
         except Exception:
             log.exception("Failed to send test emoji")
@@ -513,10 +505,11 @@ async def outgoing_handler(event: events.NewMessage.Event):
             user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
 
             # Prepare thank-you text:
-            # Use the HTML <emoji document_id="..."> form you requested so it's rendered (if client/permissions allow).
-            # NOTE: I removed the .custom command per your request and now always use the snippet below.
-            # The snippet added is: <emoji document_id="5208456004626320633">😴</emoji>
-            thank_html = 'Спасибо за покупку! <emoji document_id="5999031072887673336">😴</emoji>'
+            # Use the HTML <emoji document_id="5208725127277087011">👌</emoji> form you requested.
+            # This will instruct Telegram to render the specified document (custom emoji) in place of the 👌 glyph,
+            # provided the recipient's client/account can access that custom emoji.
+            # NOTE: rendering depends on Telegram client and availability/permissions.
+            thank_html = 'Спасибо за покупку! <emoji document_id="5208725127277087011">👌</emoji>'
 
             # register mapping for deletion on successful payment and for thank-you (mark to use HTML)
             await register_invoice(used_payload, {
