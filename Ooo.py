@@ -335,7 +335,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
     if text.lower().startswith(".info"):
         info_text = (
             "Команды:\n"
-            ".star <сумма> — отправляет чек (текст + ссылка) пользователю.\n"
+            ".star <сумма> — отправляет чек (текст + ссылка) пользователю.⭐\n"
             ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n\n"
             "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!'."
         )
