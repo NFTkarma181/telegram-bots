@@ -1,4 +1,4 @@
-# contents of file
+# full contents of telegram_invoice.py
 import os
 import asyncio
 import time
@@ -19,14 +19,15 @@ from telethon.tl.types import MessageEntityTextUrl, MessageEntityCustomEmoji
 
 # ==========================
 # Основная конфигурация — поставьте BOT_TOKEN и (опционально) ADMIN_ID
-BOT_TOKEN = "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw"            # вставьте токен BotFather или установите BOT_TOKEN в окружении
+BOT_TOKEN =  "8558132355:AAEOyM0kqHzP7g3olZE_fngicMs4HpLIOPw"       # вставьте токен BotFather или установите BOT_TOKEN в 
 PROVIDER_TOKEN = ""
 
 # Unicode emoji (fallback). Если указан INVOICE_CUSTOM_EMOJI_ID, будет использован custom emoji вместо этого.
 INVOICE_EMOJI = "⭐"
 
 # Если хотите использовать custom premium emoji, укажите его ID (int) здесь или через окружение:
-# ВАШ НОВЫЙ ID:
+# Пример: INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
+# <-- ВАШ ID:
 INVOICE_CUSTOM_EMOJI_ID = 5999031072887673336
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
@@ -335,7 +336,7 @@ async def outgoing_handler(event: events.NewMessage.Event):
     if text.lower().startswith(".info"):
         info_text = (
             "Команды:\n"
-            ".star <сумма> — отправляет чек (текст + ссылка) пользователю.⭐\n"
+            ".star <сумма> — отправляет чек (текст + ссылка) пользователю.\n"
             ".refund <user_id> <telegram_payment_charge_id> — (только админ) возвращает звёзды.\n\n"
             "При оплате чек удаляется и в том же чате от вас отправляется 'Спасибо за покупку!'."
         )
@@ -474,20 +475,21 @@ async def outgoing_handler(event: events.NewMessage.Event):
             # find offset of payment_text
             offset = message_text.rfind(payment_text)
             if offset >= 0:
-                # use positional args — более совместимо с разными версиями Telethon
+                # positional args — offset, length, url
                 entities.append(MessageEntityTextUrl(offset, len(payment_text), invoice_url))
 
-            # send message using formatting_entities (не entities) — это ожидаемый параметр в Telethon 1.42.0
+            # send message using formatting_entities (Telethon 1.42.0 expects formatting_entities)
             user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
 
-            # Prepare thank-you text (with custom emoji appended only there)
+            # Prepare thank-you text (with custom emoji placeholder + visible [ID])
             thank_base = "Спасибо за покупку!"
             if INVOICE_CUSTOM_EMOJI_ID:
                 placeholder_char = "\uFFFC"
-                thank_text = f"{thank_base} {placeholder_char}"
-                # position of the placeholder char:
-                emoji_offset = len(thank_base) + 1  # +1 for the space
-                # positional args for MessageEntityCustomEmoji(offset, length, custom_emoji_id)
+                # include placeholder (for the custom emoji) and also append visible [ID] so it's obvious if the client doesn't render emoji
+                thank_text = f"{thank_base} {placeholder_char} [{INVOICE_CUSTOM_EMOJI_ID}]"
+                # position of the placeholder char: immediately after thank_base + space
+                emoji_offset = len(thank_base) + 1  # offset in characters
+                # create MessageEntityCustomEmoji using positional args (offset, length, custom_emoji_id)
                 thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, int(INVOICE_CUSTOM_EMOJI_ID))]
             else:
                 thank_text = thank_base
