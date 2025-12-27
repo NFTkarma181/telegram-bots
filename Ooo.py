@@ -28,7 +28,7 @@ INVOICE_EMOJI = "⭐"
 # Если хотите использовать custom premium emoji, укажите его ID (int) здесь или через окружение:
 # Пример: INVOICE_CUSTOM_EMOJI_ID = 5391176922854096298
 # <-- ВАЖНО: поставил ваш ID здесь:
-INVOICE_CUSTOM_EMOJI_ID = [5391176922854096298]
+INVOICE_CUSTOM_EMOJI_ID = 5391176922854096298
 
 # Admin ID: можно указать прямо здесь или через ADMIN_ID в окружении
 ADMIN_ID = 7738435649
@@ -304,10 +304,15 @@ async def bot_updates_task():
                                     log.debug("Deleted bot invoice message %s:%s", bot_chat_id, bot_msg_id)
 
                             try:
+                                # Send thank-you message; if mapping contains thank_entities, pass them using formatting_entities
                                 thank_text = mapping.get("thank_text") or "Спасибо за покупку!"
                                 target_chat = mapping.get("user_chat_id") or payer_id
                                 if client is not None:
-                                    await client.send_message(entity=target_chat, message=thank_text)
+                                    thank_entities = mapping.get("thank_entities")
+                                    if thank_entities:
+                                        await client.send_message(entity=target_chat, message=thank_text, formatting_entities=thank_entities, link_preview=False)
+                                    else:
+                                        await client.send_message(entity=target_chat, message=thank_text, link_preview=False)
                                 log.info("Sent thank-you message as user to %s", target_chat)
                             except Exception:
                                 log.exception("Failed to send thank-you message from user")
@@ -461,38 +466,35 @@ async def outgoing_handler(event: events.NewMessage.Event):
             log.warning("createInvoiceLink result has no url: %s", result)
             return
 
-        # Формируем текст и entities: "Оплата" — маскированная ссылка, и сразу после — custom emoji (если задан)
+        # Формируем текст и entities: "Оплата" — маскированная ссылка (без emoji в чеке)
         try:
-            # текст: заголовок + описание + строка с "Оплата " + placeholder_char
-            placeholder_char = "\uFFFC"  # object replacement character — один символ для custom emoji entity
             payment_text = "Оплата"
-            message_text = f"{title}\n{description}\n{payment_text} {placeholder_char}"
+            message_text = f"{title}\n{description}\n{payment_text}"
 
             entities = []
             # find offset of payment_text
             offset = message_text.rfind(payment_text)
             if offset >= 0:
-                entities.append(MessageEntityTextUrl(offset=offset, length=len(payment_text), url=invoice_url))
+                # use positional args — более совместимо с разными версиями Telethon
+                entities.append(MessageEntityTextUrl(offset, len(payment_text), invoice_url))
 
-            # add custom emoji entity if configured
+            # send message using formatting_entities (не entities) — это ожидаемый параметр в Telethon
+            user_msg = await client.send_message(entity=target_id, message=message_text, formatting_entities=entities, link_preview=False)
+
+            # Prepare thank-you text (with custom emoji appended only there)
+            thank_base = "Спасибо за покупку!"
             if INVOICE_CUSTOM_EMOJI_ID:
-                # placeholder position is after "Оплата " (offset + len(payment_text) + 1)
-                emoji_offset = offset + len(payment_text) + 1
-                # NOTE: In some Telethon versions MessageEntityCustomEmoji expects positional args
-                # (offset, length, custom_emoji_id). Using positional form is most compatible.
-                entities.append(MessageEntityCustomEmoji(emoji_offset, 1, INVOICE_CUSTOM_EMOJI_ID))
+                placeholder_char = "\uFFFC"
+                thank_text = f"{thank_base} {placeholder_char}"
+                # position of the placeholder char:
+                emoji_offset = len(thank_base) + 1  # +1 for the space
+                # positional args for MessageEntityCustomEmoji(offset, length, custom_emoji_id)
+                thank_entities = [MessageEntityCustomEmoji(emoji_offset, 1, INVOICE_CUSTOM_EMOJI_ID)]
             else:
-                # fallback: append unicode emoji directly (replace placeholder with emoji char)
-                message_text = message_text.replace(placeholder_char, INVOICE_EMOJI or "")
-                # no custom entity needed
+                thank_text = thank_base
+                thank_entities = None
 
-            # send message without parse_mode but with entities (if custom used)
-            if INVOICE_CUSTOM_EMOJI_ID:
-                user_msg = await client.send_message(entity=target_id, message=message_text, entities=entities, link_preview=False)
-            else:
-                user_msg = await client.send_message(entity=target_id, message=message_text, link_preview=False)
-
-            # register mapping for deletion on successful payment
+            # register mapping for deletion on successful payment and for thank-you
             await register_invoice(used_payload, {
                 "type": "user",
                 "bot_chat_id": None,
@@ -500,7 +502,8 @@ async def outgoing_handler(event: events.NewMessage.Event):
                 "user_chat_id": target_id,
                 "user_msg_id": getattr(user_msg, "id", None),
                 "initiator_id": event.sender_id,
-                "thank_text": "Спасибо за покупку!"
+                "thank_text": thank_text,
+                "thank_entities": thank_entities,
             })
 
             # delete command message
